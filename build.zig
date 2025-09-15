@@ -1,5 +1,6 @@
 //! Use `zig init --strip` next time to generate a project without comments.
 const std = @import("std");
+const protobuf = @import("protobuf");
 
 // Although this function looks imperative, it does not perform the build
 // directly and instead it mutates the build graph (`b`) that will be then
@@ -21,6 +22,11 @@ pub fn build(b: *std.Build) void {
     // of this build script using `b.option()`. All defined flags (including
     // target and optimize options) will be listed when running `zig build --help`
     // in this directory.
+    //
+    const protobuf_dep = b.dependency("protobuf", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     // This creates a module, which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
@@ -84,11 +90,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // add the cpp linkers
-    // exe.linkSystemLibrary("c");
-    // exe.linkSystemLibrary("c++");
-    // exe.addIncludePath(b.path("s2client-api"));
-    // exe.addCSourceFile(.{ .file = b.path("s2client-api/src/sc2api/sc2_client.cc") });
+    // add protobuf dependency as module
+    exe.root_module.addImport("protobuf", protobuf_dep.module("protobuf"));
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
@@ -102,6 +105,25 @@ pub fn build(b: *std.Build) void {
     // For a top level step to actually do something, it must depend on other
     // steps (e.g. a Run step, as we will see in a moment).
     const run_step = b.step("run", "Run the app");
+
+    const gen_proto = b.step("gen-proto", "generate zig files from protobuf definitions");
+    const protoc_step = protobuf.RunProtocStep.create(b, protobuf_dep.builder, target, .{
+        .destination_directory = b.path("src/proto"),
+        .source_files = &.{
+            "s2client-proto/s2clientprotocol/common.proto",
+            "s2client-proto/s2clientprotocol/data.proto",
+            "s2client-proto/s2clientprotocol/debug.proto",
+            "s2client-proto/s2clientprotocol/error.proto",
+            "s2client-proto/s2clientprotocol/query.proto",
+            "s2client-proto/s2clientprotocol/raw.proto",
+            "s2client-proto/s2clientprotocol/sc2api.proto",
+            "s2client-proto/s2clientprotocol/score.proto",
+            "s2client-proto/s2clientprotocol/spatial.proto",
+            "s2client-proto/s2clientprotocol/ui.proto",
+        },
+        .include_directories = &.{"s2client-proto/"},
+    });
+    gen_proto.dependOn(&protoc_step.step);
 
     // This creates a RunArtifact step in the build graph. A RunArtifact step
     // invokes an executable compiled by Zig. Steps will only be executed by the
