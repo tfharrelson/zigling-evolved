@@ -27,6 +27,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const websocket_dep = b.dependency("websocket", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     // This creates a module, which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
@@ -92,6 +96,7 @@ pub fn build(b: *std.Build) void {
 
     // add protobuf dependency as module
     exe.root_module.addImport("protobuf", protobuf_dep.module("protobuf"));
+    exe.root_module.addImport("websocket", websocket_dep.module("websocket"));
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default

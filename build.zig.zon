@@ -33,8 +33,12 @@
     // internet connectivity.
     .dependencies = .{
         .protobuf = .{
-            .url = "git+https://github.com/Arwalk/zig-protobuf#47d67dce9f35623f3142c82db0076fc63b25a455",
-            .hash = "protobuf-2.0.0-0e82an1WIwANRorFJqVOPbAuiYmV-tZOl8w2JduAxLZD",
+            .url = "../zig-protobuf",
+            .hash = "protobuf-2.0.0-0e82aufJmjmmUplcHL7m9SafFguM54xs1p1Xl55b2Z73",
+        },
+        .websocket = .{
+            .url = "git+https://github.com/karlseguin/websocket.zig?ref=master#4deaaef2b4475a63f19c5e2f43e38fd55464b118",
+            .hash = "websocket-0.1.0-ZPISdZJxAwAt6Ys_JpoHQQV3NpWCof_N9Jg-Ul2g7OoV",
         },
     },
     .paths = .{
