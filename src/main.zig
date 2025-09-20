@@ -36,7 +36,7 @@ pub fn main() !void {
         .race = api.Race.Zerg,
     });
     try players.append(api.PlayerSetup{
-        .type = api.PlayerType.Participant,
+        .type = api.PlayerType.Computer,
         .race = api.Race.Zerg,
     });
 
