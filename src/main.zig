@@ -20,7 +20,7 @@ pub fn main() !void {
     const argv = [_][]const u8{ cmd, "-listen", sc2_host, "-port", port_string };
     var c = std.process.Child.init(&argv, allocator);
     try c.spawn();
-    errdefer _ = c.kill() catch unreachable;
+    errdefer unsafe_kill(&c);
 
     // start a game using the protobuf api
     var sock = try connect_to_game(allocator, 0);
@@ -37,7 +37,6 @@ pub fn main() !void {
     });
     try players.append(api.PlayerSetup{
         .type = api.PlayerType.Computer,
-        .race = api.Race.Zerg,
     });
 
     const map_dir = try std.process.getEnvVarOwned(allocator, "SC2_MAP_DIR");
@@ -46,31 +45,75 @@ pub fn main() !void {
     const start_game_request: api.Request = .{ .request = .{ .create_game = .{ .player_setup = players, .Map = map } } };
     defer start_game_request.deinit();
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    const arena_alloc = arena.allocator();
-    const req_buf = try start_game_request.encode(arena_alloc);
-    try sock.write(req_buf);
+    const start_game_response = try send(&sock, start_game_request);
     std.debug.print("wrote to server\n", .{});
 
-    // come up with a more explicit way to handle a null message
-    const message = try sock.read();
-    const resp = try api.Response.decode(message.?.data, allocator);
-    if (resp.response) |vresp| {
+    if (start_game_response.response) |vresp| {
         switch (vresp) {
-            .create_game => std.debug.print("found create game response! error details: {any}", .{vresp.create_game.error_details}),
-            else => std.debug.print("found something weird", .{}),
+            .create_game => std.debug.print("found create game response! error details: {any}\n", .{vresp.create_game.error_details}),
+            else => std.debug.print("found something weird\n", .{}),
         }
     }
 
     // TODO: add other processes here like the 2 bots
+    const default_client_ports = std.array_list.Managed(api.PortSet).init(allocator);
+    const join_game_request: api.Request = .{ .request = .{ .join_game = .{ .participation = .{ .race = api.Race.Zerg }, .client_ports = default_client_ports, .options = .{ .raw = true } } } };
+    std.debug.print("attempting to join game with server\n", .{});
+    const join_game_response = try send(&sock, join_game_request);
+
+    if (join_game_response.response) |vresp| {
+        switch (vresp) {
+            .join_game => {
+                if (vresp.join_game.error_details) |deets| {
+                    std.debug.print("found create game response! error: {?d}\n", .{vresp.join_game.@"error"});
+                    std.debug.print("found create game response! error details: {s}\n", .{deets.getSlice()});
+                } else {
+                    std.debug.print("found create game response! error details: None\n", .{});
+                }
+            },
+            else => std.debug.print("found something weird", .{}),
+        }
+    }
+
+    // start game loop?
+    var obs = try observe(&sock);
+    while (!is_game_over(obs)) {
+        const step_request: api.Request = .{ .request = .{ .step = .{} } };
+        const step_response = try send(&sock, step_request);
+        std.debug.print("loop number = {?d}\n", .{step_response.response.?.step.simulation_loop});
+        obs = try observe(&sock);
+    }
+    std.debug.print("game over!\n", .{});
+
+    _ = try c.kill();
     _ = try c.wait();
 }
 
-fn connect_to_game(allocator: std.mem.Allocator, attempt_num: u8) !ws.Client {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    const arena_alloc = arena.allocator();
+fn unsafe_kill(child: *std.process.Child) void {
+    _ = child.kill() catch unreachable;
+}
 
-    var client = ws.Client.init(arena_alloc, .{
+fn observe(sock: *ws.Client) !api.ResponseObservation {
+    const info_request: api.Request = .{ .request = .{ .observation = .{ .disable_fog = false } } };
+    const raw_info_response = try send(sock, info_request);
+    const info_response = raw_info_response.response orelse unreachable;
+    return info_response.observation;
+}
+fn send(sock: *ws.Client, req: api.Request) !api.Response {
+    const alloc = std.heap.page_allocator;
+    try sock.write(try req.encode(alloc));
+    const msg = try sock.read();
+    const resp = try api.Response.decode(msg.?.data, alloc);
+    std.debug.print("response status = {?d}\n", .{resp.status});
+    return resp;
+}
+
+fn is_game_over(obs: api.ResponseObservation) bool {
+    return obs.player_result.items.len > 0;
+}
+
+fn connect_to_game(allocator: std.mem.Allocator, attempt_num: u8) !ws.Client {
+    var client = ws.Client.init(allocator, .{
         .host = sc2_host,
         .port = sc2_port,
     }) catch |err| {
