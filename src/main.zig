@@ -79,16 +79,32 @@ pub fn main() !void {
     var obs = try observe(&sock, allocator);
     var timer = try std.time.Timer.start();
     while (!is_game_over(obs)) {
+
+        // take action based on observation!
+        const actions = take_actions(obs.observation.?, allocator);
+        const action_request: api.Request = .{ .request = .{ .action = .{ .actions = actions } } };
+        const action_response = try send(&sock, action_request, allocator);
+        std.debug.print("action results = {any}, time = {any}\n", .{ action_response.response.?.action.result.items, @as(f32, @floatFromInt(timer.read())) * 1e-6 });
+
+        // update state by requesting a step increase
         const step_request: api.Request = .{ .request = .{ .step = .{} } };
         std.debug.print("before time = {any}\n", .{@as(f32, @floatFromInt(timer.read())) * 1e-6});
         const step_response = try send(&sock, step_request, allocator);
         std.debug.print("loop number = {?d}, time = {any}\n", .{ step_response.response.?.step.simulation_loop, @as(f32, @floatFromInt(timer.read())) * 1e-6 });
+
+        // load up next observation for next game loop
         obs = try observe(&sock, allocator);
         std.debug.print("after time = {any}\n", .{@as(f32, @floatFromInt(timer.read())) * 1e-6});
     }
     std.debug.print("game over!\n", .{});
 
     _ = try c.kill();
+}
+
+fn take_actions(observation: api.Observation, alloc: std.mem.Allocator) std.array_list.Managed(api.Action) {
+    std.debug.print("ignoring observation: {any}\n", .{observation.game_loop});
+
+    return std.array_list.Managed(api.Action).init(alloc);
 }
 
 fn unsafe_kill(child: *std.process.Child) void {
