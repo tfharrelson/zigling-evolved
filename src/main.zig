@@ -42,10 +42,10 @@ pub fn main() !void {
     const map_dir = try std.process.getEnvVarOwned(allocator, "SC2_MAP_DIR");
     const map_path: []const u8 = try std.fmt.allocPrint(allocator, "{s}/AutomatonLE.SC2Map", .{map_dir});
     const map = api.RequestCreateGame.Map_union{ .local_map = .{ .map_path = protobuf.ManagedString{ .Const = map_path } } };
-    const start_game_request: api.Request = .{ .request = .{ .create_game = .{ .player_setup = players, .Map = map } } };
+    const start_game_request: api.Request = .{ .request = .{ .create_game = .{ .player_setup = players, .Map = map, .realtime = false } } };
     defer start_game_request.deinit();
 
-    const start_game_response = try send(&sock, start_game_request);
+    const start_game_response = try send(&sock, start_game_request, allocator);
     std.debug.print("wrote to server\n", .{});
 
     if (start_game_response.response) |vresp| {
@@ -59,7 +59,7 @@ pub fn main() !void {
     const default_client_ports = std.array_list.Managed(api.PortSet).init(allocator);
     const join_game_request: api.Request = .{ .request = .{ .join_game = .{ .participation = .{ .race = api.Race.Zerg }, .client_ports = default_client_ports, .options = .{ .raw = true } } } };
     std.debug.print("attempting to join game with server\n", .{});
-    const join_game_response = try send(&sock, join_game_request);
+    const join_game_response = try send(&sock, join_game_request, allocator);
 
     if (join_game_response.response) |vresp| {
         switch (vresp) {
@@ -76,12 +76,15 @@ pub fn main() !void {
     }
 
     // start game loop?
-    var obs = try observe(&sock);
+    var obs = try observe(&sock, allocator);
+    var timer = try std.time.Timer.start();
     while (!is_game_over(obs)) {
         const step_request: api.Request = .{ .request = .{ .step = .{} } };
-        const step_response = try send(&sock, step_request);
-        std.debug.print("loop number = {?d}\n", .{step_response.response.?.step.simulation_loop});
-        obs = try observe(&sock);
+        std.debug.print("before time = {any}\n", .{@as(f32, @floatFromInt(timer.read())) * 1e-6});
+        const step_response = try send(&sock, step_request, allocator);
+        std.debug.print("loop number = {?d}, time = {any}\n", .{ step_response.response.?.step.simulation_loop, @as(f32, @floatFromInt(timer.read())) * 1e-6 });
+        obs = try observe(&sock, allocator);
+        std.debug.print("after time = {any}\n", .{@as(f32, @floatFromInt(timer.read())) * 1e-6});
     }
     std.debug.print("game over!\n", .{});
 
@@ -93,14 +96,14 @@ fn unsafe_kill(child: *std.process.Child) void {
     _ = child.kill() catch unreachable;
 }
 
-fn observe(sock: *ws.Client) !api.ResponseObservation {
+fn observe(sock: *ws.Client, alloc: std.mem.Allocator) !api.ResponseObservation {
     const info_request: api.Request = .{ .request = .{ .observation = .{ .disable_fog = false } } };
-    const raw_info_response = try send(sock, info_request);
+    const raw_info_response = try send(sock, info_request, alloc);
     const info_response = raw_info_response.response orelse unreachable;
     return info_response.observation;
 }
-fn send(sock: *ws.Client, req: api.Request) !api.Response {
-    const alloc = std.heap.page_allocator;
+
+fn send(sock: *ws.Client, req: api.Request, alloc: std.mem.Allocator) !api.Response {
     try sock.write(try req.encode(alloc));
     const msg = try sock.read();
     const resp = try api.Response.decode(msg.?.data, alloc);
