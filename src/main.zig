@@ -89,7 +89,6 @@ pub fn main() !void {
     std.debug.print("game over!\n", .{});
 
     _ = try c.kill();
-    _ = try c.wait();
 }
 
 fn unsafe_kill(child: *std.process.Child) void {
