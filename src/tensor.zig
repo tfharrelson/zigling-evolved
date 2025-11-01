@@ -4,6 +4,7 @@ const expect = std.testing.expect;
 const TensorError = error{
     IncompatibleShapeError,
     HighDimensionality,
+    OutOfBounds,
 };
 
 const IndexTag = enum { all, int };
@@ -31,6 +32,9 @@ pub fn Tensor(comptime T: type) type {
             for (shape) |i| {
                 expected_num_items *= i;
             }
+            if (shape.len > 10) {
+                return TensorError.HighDimensionality;
+            }
             if (items.len != expected_num_items) {
                 std.debug.print("Unexpected number of items {d} found given shape {d}.\n", .{ items.len, expected_num_items });
                 return TensorError.IncompatibleShapeError;
@@ -44,9 +48,6 @@ pub fn Tensor(comptime T: type) type {
             if (indices.len != self.shape.len) {
                 return TensorError.IncompatibleShapeError;
             }
-            if (indices.len > 10) {
-                return TensorError.HighDimensionality;
-            }
 
             // get the number of elements of the output tensor
             var num_elems: usize = 1;
@@ -57,7 +58,10 @@ pub fn Tensor(comptime T: type) type {
                         num_elems *= s;
                         dim += 1;
                     },
-                    IndexTag.int => {
+                    IndexTag.int => |idx| {
+                        if (idx >= s) {
+                            return TensorError.OutOfBounds;
+                        }
                         num_elems *= 1;
                     },
                 }
@@ -98,6 +102,14 @@ pub fn Tensor(comptime T: type) type {
             new_tensor.init(elements.items, new_shape.items) catch unreachable;
             return new_tensor;
         }
+
+        pub fn matmul(self: *Self, other: Tensor(T)) !Tensor(T) {
+            // standard matrix multiplication that takes the last dim
+            // of self and multiplies with the first dim of other.
+            if (self.shape[self.shape.len - 1] != other.shape[0]) {
+                return TensorError.IncompatibleShapeError;
+            }
+        }
     };
 }
 
@@ -115,6 +127,20 @@ test "tensor init" {
         try expect(s1 == s2);
     }
     try expect(Tensor(u32).blah(11) == 42);
+}
+
+test "tensor init errors" {
+    var too_many_elements = [_]u32{ 1, 2, 3, 4, 5, 6, 7 };
+    var shape = [_]usize{ 2, 3 };
+
+    var t: Tensor(u32) = .empty;
+    const shape_error = t.init(&too_many_elements, &shape);
+    try std.testing.expectError(TensorError.IncompatibleShapeError, shape_error);
+
+    var elements = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+    var too_many_dimensions: [10]usize = @splat(1);
+    const high_dim_error = t.init(&elements, &too_many_dimensions);
+    try std.testing.expectError(TensorError.IncompatibleShapeError, high_dim_error);
 }
 
 test "tensor get" {
@@ -144,4 +170,21 @@ test "tensor get all" {
     try expect(t2.items.len == 2);
     try expect(t2.items[0] == 2);
     try expect(t2.items[1] == 5);
+}
+
+test "tensor get errors" {
+    const allocator = std.heap.page_allocator;
+    var elements = [_]u32{ 1, 2, 3, 4, 5, 6 };
+    var shape = [_]usize{ 2, 3 };
+
+    var t: Tensor(u32) = .empty;
+    try t.init(&elements, &shape);
+
+    var oob_indices = [_]Index{ .{ .int = 4 }, .{ .int = 1 } };
+    const oob_error = t.get(allocator, &oob_indices);
+    try std.testing.expectError(TensorError.OutOfBounds, oob_error);
+
+    var too_many_indices = [_]Index{ .{ .int = 1 }, .{ .int = 1 }, .{ .int = 0 } };
+    const shape_error = t.get(allocator, &too_many_indices);
+    try std.testing.expectError(TensorError.IncompatibleShapeError, shape_error);
 }
