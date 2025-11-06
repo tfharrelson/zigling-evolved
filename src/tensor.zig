@@ -23,11 +23,7 @@ pub fn Tensor(comptime T: type) type {
 
         pub const empty: Self = .{ .shape = &[_]usize{}, .items = &[_]T{} };
 
-        pub fn blah(_: usize) u32 {
-            return 42;
-        }
-
-        pub fn init(self: *Self, items: []T, shape: []usize) !void {
+        pub fn init(items: []T, shape: []usize) !Self {
             var expected_num_items: usize = 1;
             for (shape) |i| {
                 expected_num_items *= i;
@@ -39,12 +35,10 @@ pub fn Tensor(comptime T: type) type {
                 std.debug.print("Unexpected number of items {d} found given shape {d}.\n", .{ items.len, expected_num_items });
                 return TensorError.IncompatibleShapeError;
             }
-            self.shape = shape;
-            self.items = items;
-            return;
+            return .{ .shape = shape, .items = items };
         }
 
-        pub fn get(self: *Self, allocator: std.mem.Allocator, indices: []Index) !Tensor(T) {
+        pub fn get(self: *const Self, allocator: std.mem.Allocator, indices: []Index) !Tensor(T) {
             if (indices.len != self.shape.len) {
                 return TensorError.IncompatibleShapeError;
             }
@@ -72,6 +66,9 @@ pub fn Tensor(comptime T: type) type {
             var offset: usize = 0;
             var curr_weight: usize = 1;
             var weights: std.ArrayList(usize) = .empty;
+            // TODO: swap this for column major pattern, this reversing indexes happens
+            // all the time already for basic workflows and it's annoying plus prob has
+            // performance issues.
             for (0..indices.len) |i| {
                 const rev_idx = indices.len - 1 - i;
                 switch (indices[rev_idx]) {
@@ -98,17 +95,77 @@ pub fn Tensor(comptime T: type) type {
                 }
                 try elements.append(allocator, self.items[elem_idx + offset]);
             }
-            var new_tensor: Tensor(T) = .empty;
-            new_tensor.init(elements.items, new_shape.items) catch unreachable;
-            return new_tensor;
+            return Tensor(T).init(elements.items, new_shape.items) catch unreachable;
         }
 
-        pub fn matmul(self: *Self, other: Tensor(T)) !Tensor(T) {
+        pub fn matmul(self: *const Self, allocator: std.mem.Allocator, other: Tensor(T)) !Tensor(T) {
             // standard matrix multiplication that takes the last dim
             // of self and multiplies with the first dim of other.
             if (self.shape[self.shape.len - 1] != other.shape[0]) {
                 return TensorError.IncompatibleShapeError;
             }
+            // find the number of output elements
+            var self_num_items: usize = 1;
+            for (self.shape[0 .. self.shape.len - 1]) |s| {
+                self_num_items *= s;
+            }
+            var other_num_items: usize = 1;
+            for (other.shape[0 .. other.shape.len - 1]) |s| {
+                other_num_items *= s;
+            }
+
+            // got to loop through possible index combinations and calculate dot product for each
+            var output_elements = try std.ArrayList(T).initCapacity(allocator, self_num_items * other_num_items);
+            for (self_num_items) |i| {
+                for (other_num_items) |j| {
+                    const self_index_list = self.getIndexList(i, self.shape[0 .. self.shape.len - 1]);
+                    const rest_other_index_list = self.getIndexList(j, other.shape[0 .. other.shape.len - 1]);
+                    try self_index_list.append(allocator, .{ .all = {} });
+                    const other_index_list: std.ArrayList(Index) = .empty;
+                    try other_index_list.append(allocator, .{ .all = {} });
+                    try other_index_list.appendSlice(allocator, rest_other_index_list.items);
+
+                    // meat of calculation - convert to simd and calculate dot product
+                    try output_elements.append(allocator, @reduce(.Add, // simd add op
+                        @as(@Vector(self.shape[self.shape.len - 1], T), self.get(allocator, self_index_list.items).items) //
+                            * @as(@Vector(other.shape[0], T), other.get(allocator, other_index_list.items).items) //
+                        ));
+                }
+            }
+            // get new shape
+            var new_shape_list = std.ArrayList(usize).initBuffer(self.shape[0 .. self.shape.len - 1]);
+            try new_shape_list.appendSlice(allocator, other.shape[1..]);
+            return Tensor(T).init(output_elements.items, new_shape_list.items) catch unreachable;
+        }
+
+        fn getIndexList(_: *Self, allocator: std.mem.Allocator, element_idx: usize, shape: []usize) std.ArrayList(Index) {
+            var output_list: std.ArrayList(Index) = .empty;
+            var size: usize = 1;
+            for (shape) |s| {
+                size *= s;
+            }
+            // element 11 in a 4x5 matrix is elem (2, 1)
+            // can i do whatever mod math in any order to figure out the index?
+            // 11 % 4 = 3 - x
+            // 11 % 5 = 1 - check
+            // 11 - 1 % 4 = 2 check
+            // so no, the order does matter and has to be done in reverse
+            for (0..shape.len) |i| {
+                const s = shape[shape.len - 1 - i];
+                size /= s;
+                output_list.append(allocator, .{ .int = @mod(element_idx, size) });
+            }
+            // inplace reverse the list
+            var left: usize = 0;
+            var right: usize = output_list.items.len;
+            while (left < right) {
+                const left_cache = output_list.items[left];
+                output_list.items[left] = output_list.items[right];
+                output_list.items[right] = left_cache;
+                left += 1;
+                right -= 1;
+            }
+            return output_list;
         }
     };
 }
@@ -117,8 +174,7 @@ test "tensor init" {
     var elements = [_]u32{ 1, 2, 3, 4, 5, 6 };
     var shape = [_]usize{ 2, 3 };
 
-    var t: Tensor(u32) = .empty;
-    try t.init(&elements, &shape);
+    const t = try Tensor(u32).init(&elements, &shape);
     try expect(@TypeOf(t) == Tensor(u32));
     for (t.items, elements) |item, elem| {
         try expect(item == elem);
@@ -126,20 +182,18 @@ test "tensor init" {
     for (t.shape, shape) |s1, s2| {
         try expect(s1 == s2);
     }
-    try expect(Tensor(u32).blah(11) == 42);
 }
 
 test "tensor init errors" {
     var too_many_elements = [_]u32{ 1, 2, 3, 4, 5, 6, 7 };
     var shape = [_]usize{ 2, 3 };
 
-    var t: Tensor(u32) = .empty;
-    const shape_error = t.init(&too_many_elements, &shape);
+    const shape_error = Tensor(u32).init(&too_many_elements, &shape);
     try std.testing.expectError(TensorError.IncompatibleShapeError, shape_error);
 
     var elements = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
     var too_many_dimensions: [10]usize = @splat(1);
-    const high_dim_error = t.init(&elements, &too_many_dimensions);
+    const high_dim_error = Tensor(u32).init(&elements, &too_many_dimensions);
     try std.testing.expectError(TensorError.IncompatibleShapeError, high_dim_error);
 }
 
@@ -148,8 +202,7 @@ test "tensor get" {
     var elements = [_]u32{ 1, 2, 3, 4, 5, 6 };
     var shape = [_]usize{ 2, 3 };
 
-    var t: Tensor(u32) = .empty;
-    try t.init(&elements, &shape);
+    const t = try Tensor(u32).init(&elements, &shape);
 
     var indices = [_]Index{ .{ .int = 1 }, .{ .int = 1 } };
     const t2 = try t.get(allocator, &indices);
@@ -162,8 +215,7 @@ test "tensor get all" {
     var elements = [_]u32{ 1, 2, 3, 4, 5, 6 };
     var shape = [_]usize{ 2, 3 };
 
-    var t: Tensor(u32) = .empty;
-    try t.init(&elements, &shape);
+    const t = try Tensor(u32).init(&elements, &shape);
 
     var indices = [_]Index{ .{ .all = {} }, .{ .int = 1 } };
     const t2 = try t.get(allocator, &indices);
@@ -177,8 +229,7 @@ test "tensor get errors" {
     var elements = [_]u32{ 1, 2, 3, 4, 5, 6 };
     var shape = [_]usize{ 2, 3 };
 
-    var t: Tensor(u32) = .empty;
-    try t.init(&elements, &shape);
+    const t = try Tensor(u32).init(&elements, &shape);
 
     var oob_indices = [_]Index{ .{ .int = 4 }, .{ .int = 1 } };
     const oob_error = t.get(allocator, &oob_indices);
