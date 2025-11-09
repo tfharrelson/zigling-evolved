@@ -11,7 +11,7 @@ const IndexTag = enum { all, int };
 
 const Index = union(IndexTag) {
     all: void,
-    int: u32,
+    int: usize,
 };
 
 pub fn Tensor(comptime T: type) type {
@@ -116,29 +116,40 @@ pub fn Tensor(comptime T: type) type {
 
             // got to loop through possible index combinations and calculate dot product for each
             var output_elements = try std.ArrayList(T).initCapacity(allocator, self_num_items * other_num_items);
-            for (self_num_items) |i| {
-                for (other_num_items) |j| {
-                    const self_index_list = self.getIndexList(i, self.shape[0 .. self.shape.len - 1]);
-                    const rest_other_index_list = self.getIndexList(j, other.shape[0 .. other.shape.len - 1]);
+            for (0..self_num_items) |i| {
+                for (0..other_num_items) |j| {
+                    var self_index_list = try Tensor(T).getIndexList(allocator, i, self.shape[0 .. self.shape.len - 1]);
+                    const rest_other_index_list = try Tensor(T).getIndexList(allocator, j, other.shape[0 .. other.shape.len - 1]);
                     try self_index_list.append(allocator, .{ .all = {} });
-                    const other_index_list: std.ArrayList(Index) = .empty;
+                    var other_index_list: std.ArrayList(Index) = .empty;
                     try other_index_list.append(allocator, .{ .all = {} });
                     try other_index_list.appendSlice(allocator, rest_other_index_list.items);
 
                     // meat of calculation - convert to simd and calculate dot product
-                    try output_elements.append(allocator, @reduce(.Add, // simd add op
-                        @as(@Vector(self.shape[self.shape.len - 1], T), self.get(allocator, self_index_list.items).items) //
-                            * @as(@Vector(other.shape[0], T), other.get(allocator, other_index_list.items).items) //
-                        ));
+                    var value: T = 0;
+                    const row = try self.get(allocator, self_index_list.items);
+                    const column = try other.get(allocator, other_index_list.items);
+                    for (row.items, column.items) |self_item, other_item| {
+                        value += self_item * other_item;
+                    }
+                    try output_elements.append(allocator, value);
+                    // TODO: refactor this to loop over comptime known vector lengths
+                    // currently unclear how to handle different element sizes for a fixed simd size
+                    // try output_elements.append(allocator, @reduce(.Add, // simd add op
+                    //     @as(@Vector(self.shape[self.shape.len - 1], T), self.get(allocator, self_index_list.items).items) //
+                    //         * @as(@Vector(other.shape[0], T), other.get(allocator, other_index_list.items).items) //
+                    //     ));
                 }
             }
             // get new shape
-            var new_shape_list = std.ArrayList(usize).initBuffer(self.shape[0 .. self.shape.len - 1]);
+            var new_shape_list: std.ArrayList(usize) = .empty;
+            try new_shape_list.appendSlice(allocator, self.shape[0 .. self.shape.len - 1]);
             try new_shape_list.appendSlice(allocator, other.shape[1..]);
-            return Tensor(T).init(output_elements.items, new_shape_list.items) catch unreachable;
+            return try Tensor(T).init(output_elements.items, new_shape_list.items); // catch unreachable;
         }
 
-        fn getIndexList(_: *Self, allocator: std.mem.Allocator, element_idx: usize, shape: []usize) std.ArrayList(Index) {
+        fn getIndexList(allocator: std.mem.Allocator, element_idx: usize, shape: []usize) !std.ArrayList(Index) {
+            // get the array indices of a specific element index in the 'items' list
             var output_list: std.ArrayList(Index) = .empty;
             var size: usize = 1;
             for (shape) |s| {
@@ -146,18 +157,20 @@ pub fn Tensor(comptime T: type) type {
             }
             // element 11 in a 4x5 matrix is elem (2, 1)
             // can i do whatever mod math in any order to figure out the index?
-            // 11 % 4 = 3 - x
-            // 11 % 5 = 1 - check
-            // 11 - 1 % 4 = 2 check
+            // 11 % 4 = 3 -> x
+            // 11 % 5 = 1 -> check
+            // 11 - 1 % 4 = 2 -> check
             // so no, the order does matter and has to be done in reverse
             for (0..shape.len) |i| {
                 const s = shape[shape.len - 1 - i];
+                try output_list.append(allocator, .{ .int = @mod(element_idx, size) });
                 size /= s;
-                output_list.append(allocator, .{ .int = @mod(element_idx, size) });
             }
             // inplace reverse the list
+            // TODO: remove this nonsense once i sort out switching to column major ordering
+            // i'm just doing too many reverses for this to make sense
             var left: usize = 0;
-            var right: usize = output_list.items.len;
+            var right: usize = output_list.items.len - 1;
             while (left < right) {
                 const left_cache = output_list.items[left];
                 output_list.items[left] = output_list.items[right];
@@ -238,4 +251,22 @@ test "tensor get errors" {
     var too_many_indices = [_]Index{ .{ .int = 1 }, .{ .int = 1 }, .{ .int = 0 } };
     const shape_error = t.get(allocator, &too_many_indices);
     try std.testing.expectError(TensorError.IncompatibleShapeError, shape_error);
+}
+
+test "tensor matmul happy path" {
+    const allocator = std.heap.page_allocator;
+    var elements = [_]u32{ 1, 2, 3, 4 };
+    var shape = [_]usize{ 2, 2 };
+
+    const t = try Tensor(u32).init(&elements, &shape);
+
+    const output = try t.matmul(allocator, t);
+    const exp_shape = [_]usize{ 2, 2 };
+    for (exp_shape, output.shape) |e, s| {
+        try std.testing.expect(e == s);
+    }
+    const exp_items = [_]u32{ 7, 10, 15, 22 };
+    for (exp_items, output.items) |e, i| {
+        try std.testing.expect(e == i);
+    }
 }
