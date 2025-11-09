@@ -1,5 +1,6 @@
 const std = @import("std");
 const expect = std.testing.expect;
+const math = std.math;
 
 const TensorError = error{
     IncompatibleShapeError,
@@ -145,7 +146,7 @@ pub fn Tensor(comptime T: type) type {
             var new_shape_list: std.ArrayList(usize) = .empty;
             try new_shape_list.appendSlice(allocator, self.shape[0 .. self.shape.len - 1]);
             try new_shape_list.appendSlice(allocator, other.shape[1..]);
-            return try Tensor(T).init(output_elements.items, new_shape_list.items); // catch unreachable;
+            return Tensor(T).init(output_elements.items, new_shape_list.items) catch unreachable;
         }
 
         fn getIndexList(allocator: std.mem.Allocator, element_idx: usize, shape: []usize) !std.ArrayList(Index) {
@@ -181,6 +182,17 @@ pub fn Tensor(comptime T: type) type {
             return output_list;
         }
     };
+}
+
+pub fn Silu(comptime T: type, allocator: std.mem.Allocator, t: Tensor(T)) !Tensor(T) {
+    // TODO: revisit the allocation semantics - it would be way more efficient to activate
+    // tensor values in place. but right now it's just easier to allocate more memory for every op
+    // just to get things working.
+    var activated_items: std.ArrayList(T) = .empty;
+    for (t.items) |i| {
+        try activated_items.append(allocator, i / (1 + math.exp(-i)));
+    }
+    return Tensor(T).init(activated_items.items, t.shape) catch unreachable;
 }
 
 test "tensor init" {
@@ -269,4 +281,20 @@ test "tensor matmul happy path" {
     for (exp_items, output.items) |e, i| {
         try std.testing.expect(e == i);
     }
+}
+
+test "tensor silu" {
+    const allocator = std.heap.page_allocator;
+    var elements = [_]f32{ -10, 10 };
+    var shape = [_]usize{2};
+
+    const t = try Tensor(f32).init(&elements, &shape);
+
+    const activated_t = try Silu(f32, allocator, t);
+
+    try expect(activated_t.shape.len == 1);
+    try expect(activated_t.items.len == 2);
+
+    try expect(activated_t.items[0] < 0 and activated_t.items[0] > -0.01);
+    try expect(activated_t.items[1] < 10 and activated_t.items[1] > 9.99);
 }
