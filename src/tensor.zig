@@ -2,10 +2,14 @@ const std = @import("std");
 const expect = std.testing.expect;
 const math = std.math;
 
-const TensorError = error{
+pub const TensorError = error{
     IncompatibleShapeError,
     HighDimensionality,
     OutOfBounds,
+    // TODO: come up with more rigorous error handling
+    // Need this to make a proper interface
+    OutOfMemory,
+    UnexpectedError,
 };
 
 const IndexTag = enum { all, int };
@@ -24,7 +28,7 @@ pub fn Tensor(comptime T: type) type {
 
         pub const empty: Self = .{ .shape = &[_]usize{}, .items = &[_]T{} };
 
-        pub fn init(items: []T, shape: []usize) !Self {
+        pub fn init(items: []T, shape: []usize) TensorError!Self {
             var expected_num_items: usize = 1;
             for (shape) |i| {
                 expected_num_items *= i;
@@ -39,7 +43,7 @@ pub fn Tensor(comptime T: type) type {
             return .{ .shape = shape, .items = items };
         }
 
-        pub fn get(self: *const Self, allocator: std.mem.Allocator, indices: []Index) !Tensor(T) {
+        pub fn get(self: *const Self, allocator: std.mem.Allocator, indices: []Index) TensorError!Tensor(T) {
             if (indices.len != self.shape.len) {
                 return TensorError.IncompatibleShapeError;
             }
@@ -74,8 +78,8 @@ pub fn Tensor(comptime T: type) type {
                 const rev_idx = indices.len - 1 - i;
                 switch (indices[rev_idx]) {
                     IndexTag.all => {
-                        try new_shape.append(allocator, self.shape[rev_idx]);
-                        try weights.append(allocator, curr_weight);
+                        new_shape.append(allocator, self.shape[rev_idx]) catch return TensorError.OutOfMemory;
+                        weights.append(allocator, curr_weight) catch return TensorError.OutOfMemory;
                         inner_idx += 1;
                     },
                     IndexTag.int => {
@@ -94,12 +98,12 @@ pub fn Tensor(comptime T: type) type {
                     elem_idx += @mod(i, new_shape.items[rev_idx]) * weights.items[rev_idx];
                     floor_idx = @divFloor(floor_idx, new_shape.items[rev_idx]);
                 }
-                try elements.append(allocator, self.items[elem_idx + offset]);
+                elements.append(allocator, self.items[elem_idx + offset]) catch return TensorError.OutOfMemory;
             }
             return Tensor(T).init(elements.items, new_shape.items) catch unreachable;
         }
 
-        pub fn matmul(self: *const Self, allocator: std.mem.Allocator, other: Tensor(T)) !Tensor(T) {
+        pub fn matmul(self: *const Self, allocator: std.mem.Allocator, other: Tensor(T)) TensorError!Tensor(T) {
             // standard matrix multiplication that takes the last dim
             // of self and multiplies with the first dim of other.
             if (self.shape[self.shape.len - 1] != other.shape[0]) {
@@ -116,15 +120,15 @@ pub fn Tensor(comptime T: type) type {
             }
 
             // got to loop through possible index combinations and calculate dot product for each
-            var output_elements = try std.ArrayList(T).initCapacity(allocator, self_num_items * other_num_items);
+            var output_elements = std.ArrayList(T).initCapacity(allocator, self_num_items * other_num_items) catch return TensorError.OutOfMemory;
             for (0..self_num_items) |i| {
                 for (0..other_num_items) |j| {
                     var self_index_list = try Tensor(T).getIndexList(allocator, i, self.shape[0 .. self.shape.len - 1]);
                     const rest_other_index_list = try Tensor(T).getIndexList(allocator, j, other.shape[0 .. other.shape.len - 1]);
-                    try self_index_list.append(allocator, .{ .all = {} });
+                    self_index_list.append(allocator, .{ .all = {} }) catch return TensorError.OutOfMemory;
                     var other_index_list: std.ArrayList(Index) = .empty;
-                    try other_index_list.append(allocator, .{ .all = {} });
-                    try other_index_list.appendSlice(allocator, rest_other_index_list.items);
+                    other_index_list.append(allocator, .{ .all = {} }) catch return TensorError.OutOfMemory;
+                    other_index_list.appendSlice(allocator, rest_other_index_list.items) catch return TensorError.OutOfMemory;
 
                     // meat of calculation - convert to simd and calculate dot product
                     var value: T = 0;
@@ -133,7 +137,7 @@ pub fn Tensor(comptime T: type) type {
                     for (row.items, column.items) |self_item, other_item| {
                         value += self_item * other_item;
                     }
-                    try output_elements.append(allocator, value);
+                    output_elements.append(allocator, value) catch return TensorError.OutOfMemory;
                     // TODO: refactor this to loop over comptime known vector lengths
                     // currently unclear how to handle different element sizes for a fixed simd size
                     // try output_elements.append(allocator, @reduce(.Add, // simd add op
@@ -144,12 +148,12 @@ pub fn Tensor(comptime T: type) type {
             }
             // get new shape
             var new_shape_list: std.ArrayList(usize) = .empty;
-            try new_shape_list.appendSlice(allocator, self.shape[0 .. self.shape.len - 1]);
-            try new_shape_list.appendSlice(allocator, other.shape[1..]);
+            new_shape_list.appendSlice(allocator, self.shape[0 .. self.shape.len - 1]) catch return TensorError.OutOfMemory;
+            new_shape_list.appendSlice(allocator, other.shape[1..]) catch return TensorError.OutOfMemory;
             return Tensor(T).init(output_elements.items, new_shape_list.items) catch unreachable;
         }
 
-        fn getIndexList(allocator: std.mem.Allocator, element_idx: usize, shape: []usize) !std.ArrayList(Index) {
+        fn getIndexList(allocator: std.mem.Allocator, element_idx: usize, shape: []usize) TensorError!std.ArrayList(Index) {
             // get the array indices of a specific element index in the 'items' list
             var output_list: std.ArrayList(Index) = .empty;
             var size: usize = 1;
@@ -164,7 +168,7 @@ pub fn Tensor(comptime T: type) type {
             // so no, the order does matter and has to be done in reverse
             for (0..shape.len) |i| {
                 const s = shape[shape.len - 1 - i];
-                try output_list.append(allocator, .{ .int = @mod(element_idx, size) });
+                output_list.append(allocator, .{ .int = @mod(element_idx, size) }) catch return TensorError.OutOfMemory;
                 size /= s;
             }
             // inplace reverse the list
@@ -184,13 +188,13 @@ pub fn Tensor(comptime T: type) type {
     };
 }
 
-pub fn Silu(comptime T: type, allocator: std.mem.Allocator, t: Tensor(T)) !Tensor(T) {
+pub fn Silu(comptime T: type, allocator: std.mem.Allocator, t: Tensor(T)) TensorError!Tensor(T) {
     // TODO: revisit the allocation semantics - it would be way more efficient to activate
     // tensor values in place. but right now it's just easier to allocate more memory for every op
     // just to get things working.
     var activated_items: std.ArrayList(T) = .empty;
     for (t.items) |i| {
-        try activated_items.append(allocator, i / (1 + math.exp(-i)));
+        activated_items.append(allocator, i / (1 + math.exp(-i))) catch return TensorError.OutOfMemory;
     }
     return Tensor(T).init(activated_items.items, t.shape) catch unreachable;
 }

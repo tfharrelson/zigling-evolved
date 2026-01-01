@@ -1,6 +1,7 @@
 const std = @import("std");
 const expect = std.testing.expect;
 const Tensor = @import("tensor.zig").Tensor;
+const TensorError = @import("tensor.zig").TensorError;
 const Allocator = std.mem.Allocator;
 
 pub fn Linear(comptime T: type) type {
@@ -10,12 +11,12 @@ pub fn Linear(comptime T: type) type {
         shape: *[2]usize,
         params: Tensor(T),
 
-        pub fn init(alloc: Allocator, shape: *[2]usize, seed: ?usize) !Self {
+        pub fn init(alloc: Allocator, shape: *[2]usize, seed: ?usize) TensorError!Self {
             var random_seed: usize = undefined;
             if (seed) |s| {
                 random_seed = s;
             } else {
-                try std.posix.getrandom(std.mem.asBytes(&random_seed));
+                std.posix.getrandom(std.mem.asBytes(&random_seed)) catch return TensorError.UnexpectedError;
             }
             var pnrg = std.Random.DefaultPrng.init(random_seed);
             const rand = pnrg.random();
@@ -23,16 +24,16 @@ pub fn Linear(comptime T: type) type {
             for (shape) |s| {
                 num_elems *= s;
             }
-            var arr: std.ArrayList(T) = try .initCapacity(alloc, num_elems);
+            var arr = std.ArrayList(T).initCapacity(alloc, num_elems) catch return TensorError.OutOfMemory;
             for (0..num_elems) |_| {
-                try arr.append(alloc, rand.float(T));
+                arr.append(alloc, rand.float(T)) catch return TensorError.OutOfMemory;
             }
             // TODO: should this be const? this change during training
             const params = try Tensor(T).init(arr.items, shape);
             return Self{ .shape = shape, .params = params };
         }
 
-        pub fn forward(self: *Self, alloc: Allocator, state: Tensor(T)) !Tensor(T) {
+        pub fn forward(self: *Self, alloc: Allocator, state: Tensor(T)) TensorError!Tensor(T) {
             return try self.params.matmul(alloc, state);
         }
     };
