@@ -24,8 +24,7 @@ pub fn Linear(comptime T: type) type {
             for (shape) |s| {
                 num_elems *= s;
             }
-            // var arr = std.ArrayList(T).initCapacity(alloc, num_elems) catch return TensorError.OutOfMemory;
-            var arr: std.ArrayList(T) = .empty;
+            var arr = std.ArrayList(T).initCapacity(alloc, num_elems) catch return TensorError.OutOfMemory;
             for (0..num_elems) |_| {
                 arr.append(alloc, rand.float(T)) catch return TensorError.OutOfMemory;
             }
