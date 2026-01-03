@@ -24,16 +24,16 @@ pub fn Linear(comptime T: type) type {
             for (shape) |s| {
                 num_elems *= s;
             }
-            var arr = std.ArrayList(T).initCapacity(alloc, num_elems) catch return TensorError.OutOfMemory;
+            // var arr = std.ArrayList(T).initCapacity(alloc, num_elems) catch return TensorError.OutOfMemory;
+            var arr: std.ArrayList(T) = .empty;
             for (0..num_elems) |_| {
                 arr.append(alloc, rand.float(T)) catch return TensorError.OutOfMemory;
             }
-            // TODO: should this be const? this change during training
             const params = try Tensor(T).init(arr.items, shape);
             return Self{ .shape = shape, .params = params };
         }
 
-        pub fn forward(self: *Self, alloc: Allocator, state: Tensor(T)) TensorError!Tensor(T) {
+        pub fn forward(self: *Self, alloc: Allocator, state: *Tensor(T)) TensorError!Tensor(T) {
             return try self.params.matmul(alloc, state);
         }
     };
@@ -44,10 +44,10 @@ test "linear matmul happy path" {
     var elements = [_]f32{ 1, 2, 3, 4 };
     var shape = [_]usize{ 2, 2 };
 
-    const t = try Tensor(f32).init(&elements, &shape);
+    var t = try Tensor(f32).init(&elements, &shape);
     var l = try Linear(f32).init(allocator, &shape, null);
 
-    const output = try l.forward(allocator, t);
+    const output = try l.forward(allocator, &t);
     const exp_shape = [_]usize{ 2, 2 };
     for (exp_shape, output.shape) |e, s| {
         try std.testing.expect(e == s);

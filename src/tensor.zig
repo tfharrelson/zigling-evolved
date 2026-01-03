@@ -23,8 +23,8 @@ pub fn Tensor(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        items: []T = &[_]T{},
-        shape: []usize = &[_]usize{},
+        items: []T = undefined,
+        shape: []usize = undefined,
 
         pub const empty: Self = .{ .shape = &[_]usize{}, .items = &[_]T{} };
 
@@ -103,7 +103,7 @@ pub fn Tensor(comptime T: type) type {
             return Tensor(T).init(elements.items, new_shape.items) catch unreachable;
         }
 
-        pub fn matmul(self: *const Self, allocator: std.mem.Allocator, other: Tensor(T)) TensorError!Tensor(T) {
+        pub fn matmul(self: *Self, allocator: std.mem.Allocator, other: *Tensor(T)) TensorError!Tensor(T) {
             // standard matrix multiplication that takes the last dim
             // of self and multiplies with the first dim of other.
             if (self.shape[self.shape.len - 1] != other.shape[0]) {
@@ -124,7 +124,11 @@ pub fn Tensor(comptime T: type) type {
             for (0..self_num_items) |i| {
                 for (0..other_num_items) |j| {
                     var self_index_list = try Tensor(T).getIndexList(allocator, i, self.shape[0 .. self.shape.len - 1]);
-                    const rest_other_index_list = try Tensor(T).getIndexList(allocator, j, other.shape[0 .. other.shape.len - 1]);
+                    // TODO: handle the single dimension case more gracefully
+                    var rest_other_index_list: std.ArrayList(Index) = .empty;
+                    if (other.shape.len != 1) {
+                        rest_other_index_list = try Tensor(T).getIndexList(allocator, j, other.shape[0 .. other.shape.len - 1]);
+                    }
                     self_index_list.append(allocator, .{ .all = {} }) catch return TensorError.OutOfMemory;
                     var other_index_list: std.ArrayList(Index) = .empty;
                     other_index_list.append(allocator, .{ .all = {} }) catch return TensorError.OutOfMemory;
@@ -175,6 +179,9 @@ pub fn Tensor(comptime T: type) type {
             // TODO: remove this nonsense once i sort out switching to column major ordering
             // i'm just doing too many reverses for this to make sense
             var left: usize = 0;
+            if (output_list.items.len == 0) {
+                return TensorError.UnexpectedError;
+            }
             var right: usize = output_list.items.len - 1;
             while (left < right) {
                 const left_cache = output_list.items[left];
@@ -185,10 +192,25 @@ pub fn Tensor(comptime T: type) type {
             }
             return output_list;
         }
+        pub fn argmax(self: *Self) TensorError!usize {
+            // TODO: generalize this to use any shape - i have a feeling this may be necessary at some point
+            if (self.shape.len != 1) {
+                return TensorError.IncompatibleShapeError;
+            }
+            var max_value: T = self.items[0];
+            var max_index: usize = 0;
+            for (1..self.items.len) |idx| {
+                if (self.items[idx] > max_value) {
+                    max_value = self.items[idx];
+                    max_index = idx;
+                }
+            }
+            return max_index;
+        }
     };
 }
 
-pub fn Silu(comptime T: type, allocator: std.mem.Allocator, t: Tensor(T)) TensorError!Tensor(T) {
+pub fn Silu(comptime T: type, allocator: std.mem.Allocator, t: *Tensor(T)) TensorError!Tensor(T) {
     // TODO: revisit the allocation semantics - it would be way more efficient to activate
     // tensor values in place. but right now it's just easier to allocate more memory for every op
     // just to get things working.
@@ -231,7 +253,7 @@ test "tensor get" {
     var elements = [_]u32{ 1, 2, 3, 4, 5, 6 };
     var shape = [_]usize{ 2, 3 };
 
-    const t = try Tensor(u32).init(&elements, &shape);
+    var t = try Tensor(u32).init(&elements, &shape);
 
     var indices = [_]Index{ .{ .int = 1 }, .{ .int = 1 } };
     const t2 = try t.get(allocator, &indices);
@@ -244,7 +266,7 @@ test "tensor get all" {
     var elements = [_]u32{ 1, 2, 3, 4, 5, 6 };
     var shape = [_]usize{ 2, 3 };
 
-    const t = try Tensor(u32).init(&elements, &shape);
+    var t = try Tensor(u32).init(&elements, &shape);
 
     var indices = [_]Index{ .{ .all = {} }, .{ .int = 1 } };
     const t2 = try t.get(allocator, &indices);
@@ -258,7 +280,7 @@ test "tensor get errors" {
     var elements = [_]u32{ 1, 2, 3, 4, 5, 6 };
     var shape = [_]usize{ 2, 3 };
 
-    const t = try Tensor(u32).init(&elements, &shape);
+    var t = try Tensor(u32).init(&elements, &shape);
 
     var oob_indices = [_]Index{ .{ .int = 4 }, .{ .int = 1 } };
     const oob_error = t.get(allocator, &oob_indices);
@@ -274,9 +296,9 @@ test "tensor matmul happy path" {
     var elements = [_]u32{ 1, 2, 3, 4 };
     var shape = [_]usize{ 2, 2 };
 
-    const t = try Tensor(u32).init(&elements, &shape);
+    var t = try Tensor(u32).init(&elements, &shape);
 
-    const output = try t.matmul(allocator, t);
+    const output = try t.matmul(allocator, &t);
     const exp_shape = [_]usize{ 2, 2 };
     for (exp_shape, output.shape) |e, s| {
         try std.testing.expect(e == s);
@@ -292,13 +314,23 @@ test "tensor silu" {
     var elements = [_]f32{ -10, 10 };
     var shape = [_]usize{2};
 
-    const t = try Tensor(f32).init(&elements, &shape);
+    var t = try Tensor(f32).init(&elements, &shape);
 
-    const activated_t = try Silu(f32, allocator, t);
+    const activated_t = try Silu(f32, allocator, &t);
 
     try expect(activated_t.shape.len == 1);
     try expect(activated_t.items.len == 2);
 
     try expect(activated_t.items[0] < 0 and activated_t.items[0] > -0.01);
     try expect(activated_t.items[1] < 10 and activated_t.items[1] > 9.99);
+}
+
+test "tensor argmax" {
+    var elements = [_]f32{ -10, 10, 0.4 };
+    var shape = [_]usize{3};
+
+    var t = try Tensor(f32).init(&elements, &shape);
+
+    const res = try t.argmax();
+    try expect(res == 1);
 }
