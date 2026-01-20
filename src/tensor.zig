@@ -224,6 +224,25 @@ pub fn Tensor(comptime T: type) type {
             return max_index;
         }
 
+        pub fn squeeze(self: *Self, alloc: Allocator, dim: isize) TensorError!void {
+            const udim = @abs(dim);
+            const slice_dim = if (dim < 0) self.shape.len - udim else udim;
+            // keeping these separate for when i add text context to errors eventually
+            if (self.shape.len < 2) { // can't squeeze a tensor out of existence
+                return TensorError.IncompatibleShapeError;
+            }
+            if (slice_dim >= self.shape.len) { // make sure we can access it
+                return TensorError.IncompatibleShapeError;
+            }
+            if (self.shape[slice_dim] != 1) { // can only squeeze indices of value 1; e.g. can't change the num of items
+                return TensorError.IncompatibleShapeError;
+            }
+            var new_shape = std.ArrayList(usize).initCapacity(alloc, self.shape.len - 1) catch return TensorError.OutOfMemory;
+            new_shape.appendSlice(alloc, self.shape) catch return TensorError.OutOfMemory;
+            _ = new_shape.orderedRemove(slice_dim);
+            self.shape = new_shape.items;
+        }
+
         pub fn unsqueeze(self: *Self, alloc: Allocator, dim: isize) TensorError!void {
             const udim = @abs(dim);
             const slice_dim = if (dim < 0) self.shape.len - udim + 1 else udim;
@@ -509,6 +528,24 @@ test "tensor unsqueeze middle" {
 
     try t.unsqueeze(allocator, 1);
     const exp_shape = [_]usize{ 2, 1, 2 };
+    for (exp_shape, t.shape) |e, s| {
+        try std.testing.expect(e == s);
+    }
+    const exp_items = [_]u32{ 1, 2, 3, 4 };
+    for (exp_items, t.items) |e, i| {
+        try std.testing.expect(e == i);
+    }
+}
+
+test "tensor squeeze negative" {
+    const allocator = std.heap.page_allocator;
+    var elements = [_]u32{ 1, 2, 3, 4 };
+    var shape = [_]usize{ 2, 2, 1 };
+
+    var t = try Tensor(u32).init(&elements, &shape);
+
+    try t.squeeze(allocator, -1);
+    const exp_shape = [_]usize{ 2, 2 };
     for (exp_shape, t.shape) |e, s| {
         try std.testing.expect(e == s);
     }
