@@ -16,7 +16,12 @@ pub fn Model(comptime T: type) type {
 
         const VTable = struct {
             forward: *const fn (ptr: *anyopaque, alloc: Allocator, tensor: *Tensor(T)) TensorError!Tensor(T),
-            backward: *const fn (ptr: *anyopaque, alloc: Allocator, tensor: *Tensor(T), learning_rate: T) TensorError!Tensor(T),
+            backward: *const fn (
+                ptr: *anyopaque,
+                alloc: Allocator,
+                tensor: *Tensor(T),
+                update: ?Update(T),
+            ) TensorError!Tensor(T),
         };
 
         pub fn init(ptr: anytype) Self {
@@ -29,9 +34,14 @@ pub fn Model(comptime T: type) type {
                     const self: typ = @ptrCast(@alignCast(pointy));
                     return ptr_info.pointer.child.forward(self, alloc, tensor);
                 }
-                pub fn backward(pointy: *anyopaque, alloc: Allocator, tensor: *Tensor(T), learning_rate: T) TensorError!Tensor(T) {
+                pub fn backward(
+                    pointy: *anyopaque,
+                    alloc: Allocator,
+                    tensor: *Tensor(T),
+                    update: ?Update(T),
+                ) TensorError!Tensor(T) {
                     const self: typ = @ptrCast(@alignCast(pointy));
-                    return ptr_info.pointer.child.backward(self, alloc, tensor, learning_rate);
+                    return ptr_info.pointer.child.backward(self, alloc, tensor, update);
                 }
             };
 
@@ -48,8 +58,13 @@ pub fn Model(comptime T: type) type {
             return self.vtable.forward(self.ptr, alloc, tensor);
         }
 
-        pub fn backward(self: Self, alloc: Allocator, tensor: *Tensor(T), learning_rate: T) TensorError!Tensor(T) {
-            return self.vtable.backward(self.ptr, alloc, tensor, learning_rate);
+        pub fn backward(
+            self: Self,
+            alloc: Allocator,
+            tensor: *Tensor(T),
+            update: ?Update(T),
+        ) TensorError!Tensor(T) {
+            return self.vtable.backward(self.ptr, alloc, tensor, update);
         }
     };
 }
@@ -84,7 +99,12 @@ pub fn FullyConnectedLayer(comptime T: type) type {
             return try Silu(T, alloc, &intermediate);
         }
 
-        pub fn backward(self: *Self, alloc: Allocator, tensor: *Tensor(T), learning_rate: T) TensorError!Tensor(T) {
+        pub fn backward(
+            self: *Self,
+            alloc: Allocator,
+            tensor: *Tensor(T),
+            update: ?Update(T),
+        ) TensorError!Tensor(T) {
             if (self.cache) |*c| {
                 // update the weights automatically? pytorch separates backward from step
                 // but i'm having trouble envisioning a situation where those should be decoupled
@@ -125,10 +145,12 @@ pub fn FullyConnectedLayer(comptime T: type) type {
                     var ci = try c.input.get(alloc, &indices);
 
                     var weight_grad = try t.matmul(alloc, &ci);
-                    weight_grad.mul(learning_rate);
                     try total_weight_grad.add(&weight_grad);
                 }
-                try self.linear.params.add(&total_weight_grad);
+                if (update) |up| {
+                    try up.step(&self.linear.params, &total_weight_grad);
+                }
+                // try self.linear.params.add(&total_weight_grad);
 
                 // now need to multiply the tensor which represents delta right now by the weight matrix of this model
                 // to yield the weighted delta tensor that can get passed backwards to other layers
@@ -142,6 +164,63 @@ pub fn FullyConnectedLayer(comptime T: type) type {
 
         pub fn model(self: *Self) Model(T) {
             return Model(T).init(self);
+        }
+    };
+}
+
+pub fn Update(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        ptr: *anyopaque,
+        vtable: *const VTable,
+
+        const VTable = struct {
+            step: *const fn (ptr: *anyopaque, model_params: *Tensor(T), gradient: *Tensor(T)) TensorError!void,
+        };
+
+        pub fn init(ptr: anytype) Self {
+            const typ = @TypeOf(ptr);
+            const ptr_info = @typeInfo(typ);
+            std.debug.assert(ptr_info == .pointer); // must be a pointer
+
+            const gen = struct {
+                pub fn step(pointy: *anyopaque, model_params: *Tensor(T), gradient: *Tensor(T)) TensorError!void {
+                    const self: typ = @ptrCast(@alignCast(pointy));
+                    return ptr_info.pointer.child.step(self, model_params, gradient);
+                }
+            };
+
+            return .{
+                .ptr = ptr,
+                .vtable = &.{
+                    .step = gen.step,
+                },
+            };
+        }
+
+        pub fn step(self: Self, model_params: *Tensor(T), gradient: *Tensor(T)) TensorError!void {
+            return self.vtable.step(self.ptr, model_params, gradient);
+        }
+    };
+}
+
+pub fn LearningRateModelUpdate(comptime T: type) type {
+    return struct {
+        learning_rate: T,
+
+        const Self = @This();
+
+        fn init(learning_rate: T) Self {
+            return .{ .learning_rate = learning_rate };
+        }
+
+        pub fn update(self: *Self) Update(T) {
+            return Update(T).init(self);
+        }
+
+        fn step(self: *Self, model_params: *Tensor(T), gradient: *Tensor(T)) TensorError!void {
+            gradient.mul(self.learning_rate);
+            try model_params.add(gradient);
         }
     };
 }
@@ -170,8 +249,10 @@ test "fcl model backward happy path" {
     var t = try Tensor(f32).init(&elements, &shape);
     const l = try Linear(f32).init(allocator, &shape, null);
     var m = FullyConnectedLayer(f32){ .linear = l };
+    var updater = LearningRateModelUpdate(f32).init(0.01);
+
     _ = try m.model().forward(allocator, &t);
-    const output = try m.model().backward(allocator, &t, 0.01);
+    const output = try m.model().backward(allocator, &t, updater.update());
     const exp_shape = [_]usize{ 2, 2 };
     try expect(exp_shape.len == output.shape.len);
     for (exp_shape, output.shape) |e, s| {
@@ -191,8 +272,10 @@ test "fcl model backward correct numerics" {
     var test_items = [_]f32{ 1, 0, 0, 1 };
     l.params.items = &test_items;
     var m = FullyConnectedLayer(f32){ .linear = l };
+    var updater = LearningRateModelUpdate(f32).init(0.1);
+
     var res = try m.forward(allocator, &t);
-    const backprop = try m.backward(allocator, &res, 0.1);
+    const backprop = try m.backward(allocator, &res, updater.update());
     try expect(backprop.items[0] < 10.01 and backprop.items[0] > 9.99);
     try expect(backprop.items[1] < 0.01 and backprop.items[1] > -0.01);
 
