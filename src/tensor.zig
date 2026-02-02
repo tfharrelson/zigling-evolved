@@ -264,13 +264,55 @@ pub fn Tensor(comptime T: type) type {
 
         pub fn add(self: *Self, other: *Tensor(T)) TensorError!void {
             // tensor addition between compatible shapes that mutates self
+            try self.checkShape(other);
+            for (0..self.items.len) |i| {
+                self.items[i] += other.items[i];
+            }
+        }
+
+        pub fn log(self: *Self) void {
+            for (0..self.items.len) |i| {
+                self.items[i] = @log(self.items[i]);
+            }
+        }
+
+        // TODO: figure out the allocating semantics of these methods
+        // some above mutate the self tensor, while others like this one allocate another and return it.
+        pub fn elem_mul(self: *Self, alloc: Allocator, other: *Tensor(T)) TensorError!Tensor(T) {
+            try self.checkShape(other);
+            var new_items = std.ArrayList(T).initCapacity(alloc, self.items.len) catch return TensorError.OutOfMemory;
+            for (self.items, other.items) |s, o| {
+                new_items.append(alloc, s * o) catch return TensorError.OutOfMemory;
+            }
+            return Tensor(T).init(new_items.items, self.shape);
+        }
+
+        pub fn elem_div(self: *Self, alloc: Allocator, other: *Tensor(T)) TensorError!Tensor(T) {
+            try self.checkShape(other);
+            var new_items = std.ArrayList(T).initCapacity(alloc, self.items.len) catch return TensorError.OutOfMemory;
+            var div_result: T = undefined;
+            for (self.items, other.items) |s, o| {
+                // TODO: currently let this crash if div0 happens but should figure out
+                // how to resolve this for all types allowed
+                div_result = s / o;
+                new_items.append(alloc, div_result) catch return TensorError.OutOfMemory;
+            }
+            return Tensor(T).init(new_items.items, self.shape);
+        }
+
+        fn checkShape(self: *Self, other: *Tensor(T)) TensorError!void {
+            // check size of tensors
+            // TODO: would be great to push these into compile time errors instead of runtime checks
+            if (self.items.len != other.items.len) {
+                return TensorError.IncompatibleShapeError;
+            }
+            if (self.shape.len != other.shape.len) {
+                return TensorError.IncompatibleShapeError;
+            }
             for (self.shape, other.shape) |ss, os| {
                 if (ss != os) {
                     return TensorError.IncompatibleShapeError;
                 }
-            }
-            for (0..self.items.len) |i| {
-                self.items[i] += other.items[i];
             }
         }
     };
@@ -594,4 +636,36 @@ test "tensor add shape error" {
     const res = t1.add(&t2);
 
     try std.testing.expectError(TensorError.IncompatibleShapeError, res);
+}
+
+test "tensor elem mul happy path" {
+    const allocator = std.heap.page_allocator;
+    var elements = [_]u32{ 1, 2, 3, 4 };
+    var shape = [_]usize{ 2, 2 };
+
+    var t1 = try Tensor(u32).init(&elements, &shape);
+
+    var elements2 = [_]u32{ 2, 3, 4, 5 };
+    var t2 = try Tensor(u32).init(&elements2, &shape);
+    const res = try t1.elem_mul(allocator, &t2);
+    const exp_elems = [_]u32{ 2, 6, 12, 20 };
+    for (exp_elems, res.items) |e, i| {
+        try expect(e == i);
+    }
+}
+
+test "tensor elem div happy path" {
+    const allocator = std.heap.page_allocator;
+    var elements = [_]u32{ 1, 2, 3, 4 };
+    var shape = [_]usize{ 2, 2 };
+
+    var t1 = try Tensor(u32).init(&elements, &shape);
+
+    var elements2 = [_]u32{ 2, 3, 4, 5 };
+    var t2 = try Tensor(u32).init(&elements2, &shape);
+    const res = try t1.elem_div(allocator, &t2);
+    const exp_elems = [_]u32{ 0, 0, 0, 0 };
+    for (exp_elems, res.items) |e, i| {
+        try expect(e == i);
+    }
 }
