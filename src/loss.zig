@@ -26,10 +26,7 @@ pub fn ClippedSurrogate(comptime T: type) type {
             // encountered. So this may seem a little clumsy for now.
             var old_log_probs = try self.old_policy.probs(allocator, state);
             var ratio = try predicted_action.elem_div(allocator, &old_log_probs);
-            // TODO: implement the elementwise div function
             const clipped_ratio = try clip(T, allocator, &ratio, self.eps);
-            // const unclipped_value = try ratio.elem_mul(allocator, advantage);
-            // const clipped_value = try clipped_ratio.elem_mul(allocator, advantage);
 
             var loss = std.ArrayList(T).initCapacity(allocator, ratio.items.len) catch return TensorError.OutOfMemory;
             var min_item: T = undefined;
@@ -55,6 +52,16 @@ pub fn ClippedSurrogate(comptime T: type) type {
                 }
             }
             return Tensor(T).init(loss.items, ratio.shape);
+        }
+
+        pub fn backward(
+            self: *Self,
+            allocator: Allocator,
+            predicted_action: *Tensor(T),
+            advantage: *Tensor(T),
+            state: *Tensor(T),
+        ) TensorError!Tensor(T) {
+
         }
     };
 }
