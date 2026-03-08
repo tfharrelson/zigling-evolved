@@ -106,10 +106,6 @@ pub fn FullyConnectedLayer(comptime T: type) type {
             update: ?Update(T),
         ) TensorError!Tensor(T) {
             if (self.cache) |*c| {
-                // update the weights automatically? pytorch separates backward from step
-                // but i'm having trouble envisioning a situation where those should be decoupled
-                // so i'm tentatively going to couple them by default here and regret some mistake later
-
                 // need to check whether or not the caller input a tensor batch
                 // if they did, then we have to map over the batch dimension and outer product each
                 if (tensor.shape.len == 1) {
@@ -124,7 +120,6 @@ pub fn FullyConnectedLayer(comptime T: type) type {
                 // for convenience sake this is equivalent to W_l+1 \dot delta_l+1
                 // this way i don't have to pass the weight params backward to this function
                 // TODO: make an element-wise multiplication method on tensor
-                // TODO: figure out how to manipulate the tensor object directly to save memory
                 for (0..c.grad.items.len) |i| {
                     // now the tensor object is delta after this transformation
                     // TODO: do i want to manipulate tensor in place here? will it be needed elsewhere?
@@ -138,6 +133,7 @@ pub fn FullyConnectedLayer(comptime T: type) type {
                 try tensor.unsqueeze(alloc, -1);
                 defer tensor.squeeze(alloc, -1) catch @panic("tensor can't be squeezed back to original shape!");
                 try c.input.unsqueeze(alloc, 1);
+                defer c.input.squeeze(alloc, 1) catch @panic("cache can't be squeezed back to original shape!");
                 var total_weight_grad: Tensor(T) = try .zeros(alloc, self.linear.shape);
                 for (0..tensor.shape[0]) |i| {
                     var indices = [_]Index{ .{ .int = i }, .{ .all = {} }, .{ .all = {} } };
@@ -150,10 +146,6 @@ pub fn FullyConnectedLayer(comptime T: type) type {
                 if (update) |up| {
                     try up.step(&self.linear.params, &total_weight_grad);
                 }
-                // try self.linear.params.add(&total_weight_grad);
-
-                // now need to multiply the tensor which represents delta right now by the weight matrix of this model
-                // to yield the weighted delta tensor that can get passed backwards to other layers
                 return weighted_delta;
             } else {
                 // TODO: come up with a sensible error handling strategy for this one
@@ -227,14 +219,15 @@ pub fn LearningRateModelUpdate(comptime T: type) type {
 
 test "fcl model forward happy path" {
     const allocator = std.heap.page_allocator;
-    var elements = [_]f32{ 1, 2, 3, 4 };
-    var shape = [_]usize{ 2, 2 };
+    var elements = [_]f32{ 1, 2, 3, 4, 5, 6 };
+    var shape = [_]usize{ 3, 2 };
+    var model_shape = [_]usize{ 2, 2 };
 
     var t = try Tensor(f32).init(&elements, &shape);
-    const l = try Linear(f32).init(allocator, &shape, null);
+    const l = try Linear(f32).init(allocator, &model_shape, null);
     var m = FullyConnectedLayer(f32){ .linear = l };
     const output = try m.model().forward(allocator, &t);
-    const exp_shape = [_]usize{ 2, 2 };
+    const exp_shape = [_]usize{ 3, 2 };
     try expect(exp_shape.len == output.shape.len);
     for (exp_shape, output.shape) |e, s| {
         try expect(e == s);

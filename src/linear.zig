@@ -33,7 +33,14 @@ pub fn Linear(comptime T: type) type {
         }
 
         pub fn forward(self: *Self, alloc: Allocator, state: *Tensor(T)) TensorError!Tensor(T) {
-            return try self.params.matmul(alloc, state);
+            // NOTE: apply the transpose of the operation to work seamlessly with batch dimension
+            // This will likely get confusing as I tend to think of the input tensor being to the
+            // right of the the parameter tensors when writing this out on paper. May have to introduce
+            // some way to view the model parameters in the more standard state. Calculations should
+            // remain in this direction as it makes way too much sense. It's either that or, the
+            // batch dimension of the input tensor has to be the last index of the shape, which is
+            // also weird.
+            return try state.matmul(alloc, &self.params);
         }
     };
 }

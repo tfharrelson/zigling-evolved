@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const expect = std.testing.expect;
 const Model = @import("model.zig").Model;
+const Index = @import("tensor.zig").Index;
 const Tensor = @import("tensor.zig").Tensor;
 const TensorError = @import("tensor.zig").TensorError;
 const Linear = @import("linear.zig").Linear;
@@ -50,7 +51,7 @@ pub fn Policy(comptime T: type) type {
         }
 
         pub fn logprobs(self: *Self, alloc: Allocator, tensor: *Tensor(T)) TensorError!Tensor(T) {
-            var probas = self.probs(alloc, tensor);
+            var probas = try self.probs(alloc, tensor);
             probas.log(); // cast probs to log probs in place
             return probas;
         }
@@ -97,6 +98,10 @@ pub fn Policy(comptime T: type) type {
 }
 
 pub fn Softmax(comptime T: type, alloc: Allocator, tensor: *Tensor(T)) TensorError!Tensor(T) {
+    if (tensor.shape.len == 1) {
+        try tensor.unsqueeze(alloc, 0);
+        defer tensor.squeeze(alloc, 0) catch unreachable;
+    }
     var softmax_items = std.ArrayList(T).initCapacity(alloc, tensor.items.len) catch return TensorError.OutOfMemory;
     var total: T = 0;
     var exp_value: T = undefined;
@@ -105,11 +110,30 @@ pub fn Softmax(comptime T: type, alloc: Allocator, tensor: *Tensor(T)) TensorErr
         softmax_items.append(alloc, exp_value) catch return TensorError.OutOfMemory;
         total += exp_value;
     }
-    // normalize all values
-    for (0..softmax_items.items.len) |i| {
-        softmax_items.items[i] /= total;
+
+    var sm = try Tensor(T).init(softmax_items.items, tensor.shape);
+    var sm_list = std.ArrayList(T).initCapacity(alloc, sm.items.len) catch return TensorError.OutOfMemory;
+    for (0..sm.shape[0]) |row_idx| {
+        var indices = std.ArrayList(Index).initCapacity(
+            alloc,
+            tensor.shape.len,
+        ) catch return TensorError.OutOfMemory;
+
+        indices.append(alloc, Index{ .int = row_idx }) catch return TensorError.OutOfMemory;
+        for (0..(tensor.shape.len - 1)) |_| {
+            indices.append(alloc, Index{ .all = {} }) catch return TensorError.OutOfMemory;
+        }
+
+        var slice = try sm.get(alloc, indices.items);
+        var slice_total: T = 0;
+        for (slice.items) |it| {
+            slice_total += it;
+        }
+        slice.mul(1 / slice_total);
+        sm_list.appendSlice(alloc, slice.items) catch return TensorError.OutOfMemory;
     }
-    return Tensor(T).init(softmax_items.items, tensor.shape);
+
+    return Tensor(T).init(sm_list.items, sm.shape);
 }
 
 inline fn setup_test_policy(allocator: Allocator) !FCN(f32) {
@@ -180,4 +204,25 @@ test "policy epsilon action happy path" {
 
     const output = try p.epsilon_action(allocator, &t);
     try expect(output < 2 and output >= 0);
+}
+
+test "policy probs happy path" {
+    const allocator = std.heap.page_allocator;
+    var elements = [_]f32{ 1, 2, 3, 4 };
+    var t_shape = [_]usize{ 2, 2 };
+
+    var t = try Tensor(f32).init(&elements, &t_shape);
+    var fcn = try setup_test_policy(allocator);
+    const mod = fcn.model();
+    var p: Policy(f32) = try .init(mod, null, null);
+
+    const output = try p.probs(allocator, &t);
+    const exp_shape = [_]usize{ 2, 2 };
+    for (output.shape, exp_shape) |o, e| {
+        try expect(o == e);
+    }
+    const sum1 = output.items[0] + output.items[1];
+    const sum2 = output.items[2] + output.items[3];
+    try expect(sum1 > 0.99 and sum1 < 1.01);
+    try expect(sum2 > 0.99 and sum2 < 1.01);
 }

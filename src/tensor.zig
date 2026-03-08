@@ -300,6 +300,17 @@ pub fn Tensor(comptime T: type) type {
             return Tensor(T).init(new_items.items, self.shape);
         }
 
+        pub fn subtract(self: *Self, other: *Tensor(T)) TensorError!void {
+            other.mul(-1.0);
+            try self.add(other);
+        }
+
+        pub fn exp(self: *Self) void {
+            for (0..self.items.len) |i| {
+                self.items[i] = @exp(self.items[i]);
+            }
+        }
+
         fn checkShape(self: *Self, other: *Tensor(T)) TensorError!void {
             // check size of tensors
             // TODO: would be great to push these into compile time errors instead of runtime checks
